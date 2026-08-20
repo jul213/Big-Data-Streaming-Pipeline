@@ -3,5 +3,5 @@ global:
 
 scrape_configs:
   - job_name: 'big-data-pipeline-api'
-    static_configs:
-      - targets: ['host.docker.internal:8000']
+  static_configs:
+    - targets: ['172.17.0.1:8000']
