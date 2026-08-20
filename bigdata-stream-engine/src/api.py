@@ -1,9 +1,10 @@
 import time
 import logging
 from typing import List, Dict, Any, Optional
-from fastapi import FastAPI, HTTPException, status
+from fastapi import FastAPI, HTTPException, status, Response
 from pydantic import BaseModel, Field
 import pandas as pd
+from prometheus_client import Counter, Histogram, generate_latest, CONTENT_TYPE_LATEST
 
 # Configuración de Logging Estructurado (Estándar de Producción)
 logging.basicConfig(
@@ -19,18 +20,48 @@ app = FastAPI(
     version="1.0.0"
 )
 
+# --- 0. MÉTRICAS DE PROMETHEUS (OBSERVABILIDAD ABSOLUTA) ---
+REQUEST_COUNT = Counter(
+    "api_request_total", "Total de peticiones HTTP procesadas", ["method", "endpoint", "http_status"]
+)
+REQUEST_LATENCY = Histogram(
+    "api_request_latency_seconds", "Latencia del pipeline de streaming en segundos", ["endpoint"]
+)
+
+@app.middleware("http")
+async def metrics_middleware(request, call_next):
+    start_time = time.time()
+    response = await call_next(request)
+    latency = time.time() - start_time
+    
+    REQUEST_COUNT.labels(
+        method=request.method, 
+        endpoint=request.url.path, 
+        http_status=response.status_code
+    ).inc()
+    
+    REQUEST_LATENCY.labels(endpoint=request.url.path).observe(latency)
+    return response
+
+@app.get("/metrics", tags=["Observability"])
+async def metrics():
+    """Endpoint estricto de exposición de métricas para scraping de Grafana/Prometheus."""
+    return Response(generate_latest(), media_type=CONTENT_TYPE_LATEST)
+
+
 # 1. Definición del Esquema de Datos Estricto (Pydantic v2)
 class TelemetryEvent(BaseModel):
-    event_id: str = Field(..., description="Identificador único del evento", example="evt-001")
-    source_ip: str = Field(..., description="Dirección IP de origen del flujo", example="10.0.0.15")
-    action: str = Field(..., description="Acción o tipo de operación ejecutada", example="DATA_ACCESS")
-    payload_size_bytes: int = Field(..., gt=0, description="Tamaño del payload en bytes", example=1024)
+    event_id: str = Field(..., description="Identificador único del evento", json_schema_extra={"example": "evt-001"})
+    source_ip: str = Field(..., description="Dirección IP de origen del flujo", json_schema_extra={"example": "10.0.0.15"})
+    action: str = Field(..., description="Acción o tipo de operación ejecutada", json_schema_extra={"example": "DATA_ACCESS"})
+    payload_size_bytes: int = Field(..., gt=0, description="Tamaño del payload en bytes", json_schema_extra={"example": 1024})
     timestamp: Optional[float] = Field(default_factory=time.time, description="Marca de tiempo UNIX")
 
 class BatchResponse(BaseModel):
     status: str
     message: str
     analytics: Optional[Dict[str, Any]] = None
+
 
 # 2. Motor de Procesamiento en Streaming con Ventanas (Micro-batching)
 class ProductionStreamProcessor:
@@ -79,6 +110,7 @@ class ProductionStreamProcessor:
 
 # Instancia global del procesador de streaming (Ventana de 5 eventos para pruebas rápidas)
 stream_engine = ProductionStreamProcessor(batch_size=5)
+
 
 # 3. Endpoints de la API
 @app.get("/health", status_code=status.HTTP_200_OK, tags=["System Health"])
